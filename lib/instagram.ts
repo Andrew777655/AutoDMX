@@ -200,7 +200,7 @@ async function checkFollowStatus(
   try {
     console.log(`[Meta API] Checking follow status for IGSID: ${senderId}`);
     const profileRes = await fetchWithBackoff(
-      `https://graph.instagram.com/v21.0/${senderId}?fields=follows_business&access_token=${accessToken}`,
+      `https://graph.instagram.com/v21.0/${senderId}?fields=is_user_follow_business&access_token=${accessToken}`,
       { method: 'GET' }
     );
     const profileData = await profileRes.json();
@@ -217,21 +217,21 @@ async function checkFollowStatus(
       return null;
     }
 
-    if (profileData.follows_business === undefined) {
+    if (profileData.is_user_follow_business === undefined) {
       console.warn(
-        `[Meta API Warning] 'follows_business' field is missing or unavailable. Meta may have deprecated it or client permissions are insufficient.`
+        `[Meta API Warning] 'is_user_follow_business' field is missing or unavailable.`
       );
       await supabase.from('message_log').insert({
         contact_id: contactId,
         automation_id: automationId,
         direction: 'out',
-        content: 'Follow check unavailable: follows_business field missing',
+        content: 'Follow check unavailable: is_user_follow_business field missing',
         status: 'follow_unknown',
       });
       return null;
     }
 
-    const isFollowing = !!profileData.follows_business;
+    const isFollowing = !!profileData.is_user_follow_business;
     await supabase.from('message_log').insert({
       contact_id: contactId,
       automation_id: automationId,
