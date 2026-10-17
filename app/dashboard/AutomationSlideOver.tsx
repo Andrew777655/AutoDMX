@@ -25,6 +25,7 @@ type Automation = {
   links?: string[] | null;
   requires_follow: boolean;
   follow_prompt_message?: string | null;
+  button_text?: string | null;
   is_active: boolean;
 };
 
@@ -61,6 +62,7 @@ export default function AutomationSlideOver({
   const [link1, setLink1] = useState('');
   const [link2, setLink2] = useState('');
   const [link3, setLink3] = useState('');
+  const [buttonText, setButtonText] = useState('');
 
   // 4. Require follow gate
   const [requiresFollow, setRequiresFollow] = useState(false);
@@ -91,6 +93,7 @@ export default function AutomationSlideOver({
       setLink1(existingAutomation.links?.[0] || '');
       setLink2(existingAutomation.links?.[1] || '');
       setLink3(existingAutomation.links?.[2] || '');
+      setButtonText(existingAutomation.button_text || '');
 
       setRequiresFollow(existingAutomation.requires_follow ?? false);
       setFollowPromptMessage(existingAutomation.follow_prompt_message || '');
@@ -111,6 +114,7 @@ export default function AutomationSlideOver({
       setLink1('');
       setLink2('');
       setLink3('');
+      setButtonText('');
 
       setRequiresFollow(false);
       setFollowPromptMessage('Please follow our profile first to get the link!');
@@ -154,6 +158,7 @@ export default function AutomationSlideOver({
         links: parsedLinks,
         requiresFollow,
         followPromptMessage: requiresFollow ? followPromptMessage : null,
+        buttonText,
         isActive,
       });
       if (!result.success) {
@@ -350,6 +355,21 @@ export default function AutomationSlideOver({
                   className="apple-input"
                 />
               </div>
+            </Section>
+
+            {/* 5. Button text */}
+            <Section
+              title="Button text"
+              hint="Label on the link button in the DM. Max 20 characters. Multiple links get numbered."
+            >
+              <input
+                type="text"
+                maxLength={20}
+                placeholder="Open link"
+                value={buttonText}
+                onChange={(e) => setButtonText(e.target.value)}
+                className="apple-input"
+              />
             </Section>
 
             {/* Collapsible Advanced Section */}

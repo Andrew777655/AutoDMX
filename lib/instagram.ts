@@ -23,6 +23,7 @@ interface InstagramAutomation {
   links?: string[] | null;
   requires_follow?: boolean;
   follow_prompt_message?: string | null;
+  button_text?: string | null;
   is_active?: boolean;
 }
 
@@ -90,6 +91,7 @@ type OutgoingMessage =
 interface FinalMessage {
   text: string;
   links: string[]; // redirect-wrapped tracking links
+  buttonText: string;
 }
 
 /**
@@ -115,11 +117,12 @@ function toButtonMessage(final: FinalMessage): OutgoingMessage {
       payload: {
         template_type: 'button',
         text,
-        buttons: final.links.map((url, i) => ({
-          type: 'web_url' as const,
-          url,
-          title: final.links.length === 1 ? 'Open link' : `Open link ${i + 1}`,
-        })),
+        buttons: final.links.map((url, i) => {
+          // Instagram caps button titles at 20 characters, including the " 2"/" 3" suffix.
+          const suffix = final.links.length === 1 ? '' : ` ${i + 1}`;
+          const label = Array.from(final.buttonText).slice(0, 20 - suffix.length).join('');
+          return { type: 'web_url' as const, url, title: label + suffix };
+        }),
       },
     },
   };
@@ -182,7 +185,7 @@ async function buildFinalMessage(automation: InstagramAutomation): Promise<Final
       }
     }
   }
-  return { text, links: trackingLinks };
+  return { text, links: trackingLinks, buttonText: automation.button_text?.trim() || 'Open link' };
 }
 
 /**
@@ -460,10 +463,7 @@ export async function handleCommentTrigger(
         nextStep = 'completed';
       } else {
         console.log(`[Instagram Trigger] User is not confirmed as following. Sending follow prompt.`);
-        let followPrompt = automation.follow_prompt_message || 'Please follow our profile first to get the link!';
-        if (account.ig_username) {
-          followPrompt += `\n\n👉 Follow here: https://www.instagram.com/${account.ig_username}`;
-        }
+        const followPrompt = automation.follow_prompt_message || 'Please follow our profile first to get the link!';
         messageText = followPrompt;
         message = {
           text: followPrompt,
@@ -678,10 +678,7 @@ export async function handleMessageEvent(
       console.log(`[Instagram Webhook DM] User is not following. Sending a single re-prompt.`);
       await new Promise((resolve) => setTimeout(resolve, 2000));
       const mostRecentAutomation = pendingFollowStates[0].automations!;
-      let followPrompt = mostRecentAutomation.follow_prompt_message || 'Please follow our profile first to get the link!';
-      if (account.ig_username) {
-        followPrompt += `\n\n👉 Follow here: https://www.instagram.com/${account.ig_username}`;
-      }
+      const followPrompt = mostRecentAutomation.follow_prompt_message || 'Please follow our profile first to get the link!';
       await sendDmAndLog(
         {
           text: followPrompt,

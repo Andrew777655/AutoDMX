@@ -15,6 +15,7 @@ export type AutomationInput = {
   links: string[];
   requiresFollow: boolean;
   followPromptMessage?: string | null;
+  buttonText?: string | null;
   isActive: boolean;
 };
 
@@ -32,6 +33,12 @@ export async function savePostAutomation(input: AutomationInput) {
   });
   if (badLink) {
     return { success: false, error: `Invalid link "${badLink}". Links must start with https:// (or http://).` };
+  }
+
+  // Instagram caps button titles at 20 characters.
+  const buttonText = input.buttonText?.trim() || null;
+  if (buttonText && Array.from(buttonText).length > 20) {
+    return { success: false, error: 'Button text must be 20 characters or fewer.' };
   }
 
   // Verify the account exists
@@ -67,6 +74,7 @@ export async function savePostAutomation(input: AutomationInput) {
     links: input.links,
     requires_follow: input.requiresFollow,
     follow_prompt_message: input.followPromptMessage || null,
+    button_text: buttonText,
     is_active: input.isActive,
   };
 
