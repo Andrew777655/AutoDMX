@@ -28,8 +28,9 @@ export async function savePostAutomation(input: AutomationInput) {
     .eq('id', input.accountId)
     .single();
 
+  // Return errors instead of throwing: Next.js hides thrown error messages in production builds.
   if (accountError || !account) {
-    throw new Error('Account not found.');
+    return { success: false, error: `Account not found${accountError ? `: ${accountError.message}` : '.'}` };
   }
 
   // Check for existing automation for this specific post
@@ -71,9 +72,9 @@ export async function savePostAutomation(input: AutomationInput) {
   }
 
   if (error) {
-    throw new Error(`Failed to save automation: ${error.message}`);
+    return { success: false, error: `Failed to save automation: ${error.message}` };
   }
 
   revalidatePath('/dashboard');
-  return { success: true };
+  return { success: true, error: null };
 }

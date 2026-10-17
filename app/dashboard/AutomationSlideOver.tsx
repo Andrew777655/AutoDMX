@@ -140,7 +140,7 @@ export default function AutomationSlideOver({
       .filter((l) => l !== '');
 
     try {
-      await savePostAutomation({
+      const result = await savePostAutomation({
         accountId,
         name,
         triggerType: 'comment',
@@ -154,6 +154,10 @@ export default function AutomationSlideOver({
         followPromptMessage: requiresFollow ? followPromptMessage : null,
         isActive,
       });
+      if (!result.success) {
+        setError(result.error || 'Failed to save automation');
+        return;
+      }
       onSuccess();
       onClose();
     } catch (err) {
