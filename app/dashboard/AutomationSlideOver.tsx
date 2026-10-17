@@ -97,7 +97,9 @@ export default function AutomationSlideOver({
       setIsActive(existingAutomation.is_active);
     } else {
       const firstLine = post.caption ? post.caption.split('\n')[0] : '';
-      setName(`Comment Automation: ${firstLine.substring(0, 40) || post.id}`);
+      // Truncate by code point so emoji aren't split into invalid half-characters.
+      const shortCaption = Array.from(firstLine).slice(0, 40).join('');
+      setName(`Comment Automation: ${shortCaption || post.id}`);
       setMatchAnyComment(false);
       setKeywords('');
 
