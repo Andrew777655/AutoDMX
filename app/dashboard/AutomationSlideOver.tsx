@@ -107,7 +107,7 @@ export default function AutomationSlideOver({
       setPublicReply2('Sent you a DM! Let me know if you got it.');
       setPublicReply3('');
 
-      setMessage('Hey! Thanks for commenting. Here is the link you requested: [link]');
+      setMessage('Hey! Thanks for commenting. Here is the link you requested 👇');
       setLink1('');
       setLink2('');
       setLink3('');

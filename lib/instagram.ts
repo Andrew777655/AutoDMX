@@ -72,17 +72,98 @@ interface DecryptedAccount {
   ig_username?: string;
 }
 
+type QuickReply = { content_type: string; title: string; payload: string };
+
+type OutgoingMessage =
+  | { text: string; quick_replies?: QuickReply[] }
+  | {
+      attachment: {
+        type: 'template';
+        payload: {
+          template_type: 'button';
+          text: string;
+          buttons: Array<{ type: 'web_url'; url: string; title: string }>;
+        };
+      };
+    };
+
+interface FinalMessage {
+  text: string;
+  links: string[]; // redirect-wrapped tracking links
+}
+
 /**
- * Builds the final message string containing the final message and redirect-wrapped links.
+ * Plain-text version of a final message, used for logging and as a fallback
+ * if Instagram rejects the button template.
  */
-async function buildFinalMessage(automation: InstagramAutomation): Promise<string> {
-  const finalMsg = automation.message || '';
+function finalMessageAsText(final: FinalMessage): string {
+  return [final.text, final.links.join('\n')].filter(Boolean).join('\n\n');
+}
+
+/**
+ * Turns a final message into an Instagram button template, with one button per link (max 3).
+ */
+function toButtonMessage(final: FinalMessage): OutgoingMessage {
+  if (final.links.length === 0 || final.links.length > 3) {
+    return { text: finalMessageAsText(final) };
+  }
+  // Button template text is capped at 640 chars; truncate by code point so emoji stay intact.
+  const text = Array.from(final.text || 'Here you go 👇').slice(0, 640).join('');
+  return {
+    attachment: {
+      type: 'template',
+      payload: {
+        template_type: 'button',
+        text,
+        buttons: final.links.map((url, i) => ({
+          type: 'web_url' as const,
+          url,
+          title: final.links.length === 1 ? 'Open link' : `Open link ${i + 1}`,
+        })),
+      },
+    },
+  };
+}
+
+/**
+ * Sends a message through the Instagram Messaging API. If a button template is rejected,
+ * retries once as plain text so the user still gets their link.
+ */
+async function postMessage(
+  igUserId: string,
+  accessToken: string,
+  recipient: { id: string } | { comment_id: string },
+  message: OutgoingMessage,
+  fallbackText: string
+) {
+  const send = async (msg: OutgoingMessage) => {
+    const res = await fetchWithBackoff(`https://graph.instagram.com/v21.0/${igUserId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recipient, message: msg, access_token: accessToken }),
+    });
+    return res.json();
+  };
+
+  let data = await send(message);
+  if (data.error && 'attachment' in message) {
+    console.warn('[Meta API] Button message rejected, falling back to plain text:', data.error.message);
+    data = await send({ text: fallbackText });
+  }
+  return data;
+}
+
+/**
+ * Builds the final message text and redirect-wrapped links.
+ */
+async function buildFinalMessage(automation: InstagramAutomation): Promise<FinalMessage> {
+  // Links are delivered as buttons, so drop any "[link]" placeholder left in the message text.
+  const text = (automation.message || '').replace(/\s*\[link\]/gi, '').trim();
   const links = automation.links || [];
-  let fullMessage = finalMsg;
   const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:3000';
+  const trackingLinks: string[] = [];
 
   if (links.length > 0) {
-    const trackingLinks: string[] = [];
     for (const link of links) {
       const { data: trackData, error: trackError } = await supabase
         .from('tracked_links')
@@ -100,20 +181,22 @@ async function buildFinalMessage(automation: InstagramAutomation): Promise<strin
         trackingLinks.push(`${siteUrl}/r/${trackData.id}`);
       }
     }
-    fullMessage += '\n\n' + trackingLinks.join('\n');
   }
-  return fullMessage;
+  return { text, links: trackingLinks };
 }
 
 /**
  * Verifies follow status of the user using the Instagram profile API.
+ * Returns null when the status can't be determined. Instagram refuses profile lookups
+ * ("User consent is required") until the user has messaged the account, so this is
+ * always null for a fresh commenter. Callers decide how to treat null.
  */
 async function checkFollowStatus(
   senderId: string,
   accessToken: string,
   contactId: string,
   automationId: string
-): Promise<boolean> {
+): Promise<boolean | null> {
   try {
     console.log(`[Meta API] Checking follow status for IGSID: ${senderId}`);
     const profileRes = await fetchWithBackoff(
@@ -121,31 +204,31 @@ async function checkFollowStatus(
       { method: 'GET' }
     );
     const profileData = await profileRes.json();
-    
+
     if (profileData.error) {
-      console.error(`[Meta API Error] Follow status check returned error:`, profileData.error.message);
+      console.warn(`[Meta API] Follow status unavailable:`, profileData.error.message);
       await supabase.from('message_log').insert({
         contact_id: contactId,
         automation_id: automationId,
         direction: 'out',
-        content: `Follow check passed (failed open on error: ${profileData.error.message})`,
-        status: 'follow_passed',
+        content: `Follow check unavailable: ${profileData.error.message}`,
+        status: 'follow_unknown',
       });
-      return true; // Fail open
+      return null;
     }
 
     if (profileData.follows_business === undefined) {
       console.warn(
-        `[Meta API Warning] 'follows_business' field is missing or unavailable. Meta may have deprecated it or client permissions are insufficient. Defaulting to 'true' (fail open).`
+        `[Meta API Warning] 'follows_business' field is missing or unavailable. Meta may have deprecated it or client permissions are insufficient.`
       );
       await supabase.from('message_log').insert({
         contact_id: contactId,
         automation_id: automationId,
         direction: 'out',
-        content: 'Follow check passed (failed open due to missing field)',
-        status: 'follow_passed',
+        content: 'Follow check unavailable: follows_business field missing',
+        status: 'follow_unknown',
       });
-      return true; // Fail open
+      return null;
     }
 
     const isFollowing = !!profileData.follows_business;
@@ -164,10 +247,10 @@ async function checkFollowStatus(
       contact_id: contactId,
       automation_id: automationId,
       direction: 'out',
-      content: `Follow check passed (failed open on exception: ${errorMsg})`,
-      status: 'follow_passed',
+      content: `Follow check unavailable: ${errorMsg}`,
+      status: 'follow_unknown',
     });
-    return true; // Fail open
+    return null;
   }
 }
 
@@ -180,8 +263,8 @@ async function sendOrQueueReply(
   contactId: string,
   comment: InstagramComment,
   automation: InstagramAutomation,
-  text: string,
-  quickReplies?: Array<{ content_type: string; title: string; payload: string }>
+  message: OutgoingMessage,
+  text: string // plain-text version, used for logging, the send queue and as a fallback
 ) {
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   const { count } = await supabase
@@ -196,29 +279,13 @@ async function sendOrQueueReply(
 
   if (!isRateLimitExceeded) {
     console.log(`[Meta API] Sending private reply for comment ${comment.id}`);
-    const body: {
-      recipient: { comment_id: string };
-      message: { text: string; quick_replies?: Array<{ content_type: string; title: string; payload: string }> };
-      access_token: string;
-    } = {
-      recipient: { comment_id: comment.id },
-      message: { text },
-      access_token: accessToken,
-    };
-    
-    if (quickReplies && quickReplies.length > 0) {
-      body.message.quick_replies = quickReplies;
-    }
-
-    const dmRes = await fetchWithBackoff(
-      `https://graph.instagram.com/v21.0/${account.ig_user_id}/messages`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      }
+    const dmData = await postMessage(
+      account.ig_user_id,
+      accessToken,
+      { comment_id: comment.id },
+      message,
+      text
     );
-    const dmData = await dmRes.json();
     if (dmData.error) {
       console.error(`[Meta API Error] Failed to send private DM:`, dmData.error.message);
       await supabase.from('message_log').insert({
@@ -246,7 +313,7 @@ async function sendOrQueueReply(
       payload: {
         comment_id: comment.id,
         message: text,
-        quick_replies: quickReplies,
+        quick_replies: 'quick_replies' in message ? message.quick_replies : undefined,
         comment_created_time: comment.created_time,
       },
       scheduled_for: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
@@ -368,14 +435,15 @@ export async function handleCommentTrigger(
     // 4. Evaluate gates for the one-shot private reply
     const requiresFollow = automation.requires_follow ?? false;
 
+    let message: OutgoingMessage;
     let messageText = '';
-    let quickReplies: Array<{ content_type: string; title: string; payload: string }> | undefined = undefined;
     let nextStep = 'completed';
 
     if (requiresFollow) {
-      // Bug fix: Check actual follow status FIRST before deciding what to send.
-      // Previously, the follow prompt was sent unconditionally — even to existing followers.
-      // Now: followers get the link immediately, non-followers get the prompt.
+      // Followers get the link immediately. Anyone we can't confirm as a follower gets the
+      // follow prompt. That includes every first-time commenter, because Instagram won't share
+      // follow status until the user has messaged us. Tapping "I followed!" sends that message,
+      // and the DM handler re-checks.
       console.log(`[Instagram Trigger] Follow gate enabled — checking if ${comment.from.id} is already following...`);
       const isAlreadyFollowing = await checkFollowStatus(
         comment.from.id,
@@ -384,37 +452,40 @@ export async function handleCommentTrigger(
         automation.id
       );
 
-      if (isAlreadyFollowing) {
-        // Already a follower — skip the gate and send the link directly
+      if (isAlreadyFollowing === true) {
         console.log(`[Instagram Trigger] User is already following. Sending final message directly.`);
         const finalMsg = await buildFinalMessage(automation);
-        messageText = finalMsg;
+        message = toButtonMessage(finalMsg);
+        messageText = finalMessageAsText(finalMsg);
         nextStep = 'completed';
       } else {
-        // Not a follower — ask them to follow first
-        console.log(`[Instagram Trigger] User is not following. Sending follow prompt.`);
+        console.log(`[Instagram Trigger] User is not confirmed as following. Sending follow prompt.`);
         let followPrompt = automation.follow_prompt_message || 'Please follow our profile first to get the link!';
         if (account.ig_username) {
           followPrompt += `\n\n👉 Follow here: https://www.instagram.com/${account.ig_username}`;
         }
         messageText = followPrompt;
-        quickReplies = [
-          {
-            content_type: 'text',
-            title: 'I followed!',
-            payload: 'I_FOLLOWED',
-          },
-        ];
+        message = {
+          text: followPrompt,
+          quick_replies: [
+            {
+              content_type: 'text',
+              title: 'I followed!',
+              payload: 'I_FOLLOWED',
+            },
+          ],
+        };
         nextStep = 'awaiting_follow_recheck';
       }
     } else {
       const finalMsg = await buildFinalMessage(automation);
-      messageText = finalMsg;
+      message = toButtonMessage(finalMsg);
+      messageText = finalMessageAsText(finalMsg);
       nextStep = 'completed';
     }
 
     // 5. Send or queue the private reply message (one-shot comment reply limit)
-    await sendOrQueueReply(account, accessToken, contactId, comment, automation, messageText, quickReplies);
+    await sendOrQueueReply(account, accessToken, contactId, comment, automation, message, messageText);
 
     // 6. Upsert conversation state
     const { data: existingState } = await supabase
@@ -525,34 +596,17 @@ export async function handleMessageEvent(
 
     // Helper to send a DM and log it, attributed to the correct automation
     const sendDmAndLog = async (
+      message: OutgoingMessage,
       msgText: string,
-      automationId: string,
-      quickReplies?: Array<{ content_type: string; title: string; payload: string }>
+      automationId: string
     ) => {
-      const body: {
-        recipient: { id: string };
-        message: { text: string; quick_replies?: Array<{ content_type: string; title: string; payload: string }> };
-        access_token: string;
-      } = {
-        recipient: { id: senderId },
-        message: { text: msgText },
-        access_token: accessToken,
-      };
-
-      if (quickReplies && quickReplies.length > 0) {
-        body.message.quick_replies = quickReplies;
-      }
-
-      const dmRes = await fetchWithBackoff(
-        `https://graph.instagram.com/v21.0/${account.ig_user_id}/messages`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        }
+      const dmData = await postMessage(
+        account.ig_user_id,
+        accessToken,
+        { id: senderId },
+        message,
+        msgText
       );
-      
-      const dmData = await dmRes.json();
       if (dmData.error) {
         console.error(`[Meta API Error] Failed to send DM reply:`, dmData.error.message);
         await supabase.from('message_log').insert({
@@ -603,13 +657,15 @@ export async function handleMessageEvent(
       pendingFollowStates[0].automations!.id
     );
 
-    if (isFollowingNow) {
+    // The user has now messaged us, so Instagram should report follow status. If it still
+    // can't, keep the gate closed (null is treated as not following) rather than leak the link.
+    if (isFollowingNow === true) {
       // User is following — deliver every pending automation's link in sequence
       console.log(`[Instagram Webhook DM] User is following. Sending links for ${pendingFollowStates.length} automation(s).`);
       for (const state of pendingFollowStates) {
         const automation = state.automations!;
         const finalMsg = await buildFinalMessage(automation);
-        await sendDmAndLog(finalMsg, automation.id);
+        await sendDmAndLog(toButtonMessage(finalMsg), finalMessageAsText(finalMsg), automation.id);
         await supabase
           .from('conversation_state')
           .update({ current_step: 'completed' })
@@ -626,13 +682,20 @@ export async function handleMessageEvent(
       if (account.ig_username) {
         followPrompt += `\n\n👉 Follow here: https://www.instagram.com/${account.ig_username}`;
       }
-      await sendDmAndLog(followPrompt, mostRecentAutomation.id, [
+      await sendDmAndLog(
         {
-          content_type: 'text',
-          title: 'I followed! ✅',
-          payload: 'I_FOLLOWED',
+          text: followPrompt,
+          quick_replies: [
+            {
+              content_type: 'text',
+              title: 'I followed! ✅',
+              payload: 'I_FOLLOWED',
+            },
+          ],
         },
-      ]);
+        followPrompt,
+        mostRecentAutomation.id
+      );
       // All states remain on awaiting_follow_recheck — they will be retried next time
     }
   } catch (err) {

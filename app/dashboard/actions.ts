@@ -21,6 +21,19 @@ export type AutomationInput = {
 export async function savePostAutomation(input: AutomationInput) {
   const supabase = createClient();
 
+  // Links are sent as Instagram buttons, which need a valid http(s) URL.
+  const badLink = input.links.find((link) => {
+    try {
+      const { protocol } = new URL(link);
+      return protocol !== 'http:' && protocol !== 'https:';
+    } catch {
+      return true;
+    }
+  });
+  if (badLink) {
+    return { success: false, error: `Invalid link "${badLink}". Links must start with https:// (or http://).` };
+  }
+
   // Verify the account exists
   const { data: account, error: accountError } = await supabase
     .from('accounts')
